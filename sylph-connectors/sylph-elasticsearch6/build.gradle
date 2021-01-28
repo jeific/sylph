@@ -1,0 +1,4 @@
+
+dependencies {
+  compile 'com.github.harbby:es-client:6.4.0-1:shaded'
+}

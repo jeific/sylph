@@ -1,8 +1,21 @@
 ext.moduleName = 'ideal.sylph.main'
 
+apply plugin: 'application'
+
 dependencies {
-  compile project(':sylph-controller')
+  compile group: 'org.apache.commons', name: 'commons-lang3', version: '3.8.1'
+  compile 'org.xerial:sqlite-jdbc:3.25.2'
+  compile group: 'commons-dbutils', name: 'commons-dbutils', version: '1.7'
+  
+  compile project(':sylph-web')
   compile(project(':sylph-spi'))
-  compile project(':ideal-common')
+
   testCompile group: 'org.fusesource.jansi', name: 'jansi', version: '1.17.1'
+}
+
+application {
+  mainClassName = "ideal.sylph.main.SylphMaster"
+  applicationName = "sylph"
+  applicationDefaultJvmArgs = ["-Dconfig=etc/sylph/sylph.properties", "-Dlog4j.file=etc/sylph/sylph-log4j.properties"]
+  //applicationDefaultJvmArgs = ["-Xms512m", "-Xmx512m"]
 }

@@ -1,33 +1,31 @@
 evaluationDependsOn(':sylph-dist')
 subprojects {
-    apply plugin: 'com.github.harbby.gradle.serviceloader'
-    serviceLoader {
-        serviceInterface 'ideal.sylph.etl.PipelinePlugin'
-    }
+  apply plugin: 'com.github.harbby.gradle.serviceloader'
+  serviceLoader {
+    serviceInterface 'ideal.sylph.etl.Plugin'
+  }
 
-    sourceCompatibility = 1.8
-    targetCompatibility = 1.8
+  configurations.all {
+    resolutionStrategy { preferProjectModules() }
+  }
 
-    configurations.all {
-        resolutionStrategy {  preferProjectModules() }
-    }
+  dependencies {
+    compileOnly group: 'com.github.harbby', name: 'gadtry', version: deps.gadtry
+    compileOnly project(":sylph-api")
+    
+    testCompile project(":sylph-spi")
+  }
 
-    dependencies {
-        compileOnly project(":sylph-etl-api")
-    }
+  def plugins = project(':sylph-dist').buildDir.path + "/plugins/${name}"
+  task buildPlugins(type: Copy) {
 
-    def plugins=project(':sylph-dist').buildDir.path + "/etl-plugins/${name}"
-    task buildPlugins(type:Copy) {
+    from(configurations.runtime)
+    from(jar)
 
-        from (configurations.runtime)
-        into plugins
-
-        from(jar)
-        into plugins
-
-        //include   '*.jar'
-    }
-    assemble.dependsOn buildPlugins
-    project(':sylph-dist').dist.dependsOn assemble
+    into plugins
+    //include   '*.jar'
+  }
+  assemble.dependsOn buildPlugins
+  project(':sylph-dist').dist.dependsOn assemble
 }
 

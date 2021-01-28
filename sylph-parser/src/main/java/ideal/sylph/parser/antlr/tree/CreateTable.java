@@ -15,7 +15,7 @@
  */
 package ideal.sylph.parser.antlr.tree;
 
-import com.google.common.collect.ImmutableList;
+import com.github.harbby.gadtry.collection.mutable.MutableList;
 
 import java.util.List;
 import java.util.Map;
@@ -23,7 +23,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-import static com.google.common.base.MoreObjects.toStringHelper;
+import static com.github.harbby.gadtry.base.MoreObjects.toStringHelper;
 import static java.util.Objects.requireNonNull;
 
 public class CreateTable
@@ -37,7 +37,8 @@ public class CreateTable
     }
 
     private final QualifiedName name;
-    private final List<TableElement> elements;
+    private final List<ColumnDefinition> elements;
+    private final List<Proctime> proctimeList;
     private final boolean notExists;
     private final List<Property> properties;
     private final Optional<String> comment;
@@ -47,23 +48,28 @@ public class CreateTable
     public CreateTable(Type type,
             NodeLocation location,
             QualifiedName name,
-            List<TableElement> elements,
+            List<ColumnDefinition> elements,
+            List<Proctime> proctimeList,
             boolean notExists,
             List<Property> properties,
             Optional<String> comment,
             Optional<WaterMark> watermark)
     {
-        this(type, Optional.of(location), name, elements, notExists, properties, comment, watermark);
+        this(type, Optional.of(location), name, elements, proctimeList, notExists, properties, comment, watermark);
     }
 
-    private CreateTable(Type type, Optional<NodeLocation> location, QualifiedName name,
-            List<TableElement> elements, boolean notExists,
+    private CreateTable(Type type, Optional<NodeLocation> location,
+            QualifiedName name,
+            List<ColumnDefinition> elements,
+            List<Proctime> proctimeList,
+            boolean notExists,
             List<Property> properties, Optional<String> comment,
             Optional<WaterMark> watermark)
     {
         super(location);
         this.name = requireNonNull(name, "table is null");
-        this.elements = ImmutableList.copyOf(requireNonNull(elements, "elements is null"));
+        this.elements = MutableList.copy(requireNonNull(elements, "elements is null"));
+        this.proctimeList = requireNonNull(proctimeList, "proctimeList is null");
         this.notExists = notExists;
         this.properties = requireNonNull(properties, "properties is null");
         this.comment = requireNonNull(comment, "comment is null");
@@ -76,9 +82,14 @@ public class CreateTable
         return name.getParts().get(name.getParts().size() - 1);
     }
 
-    public List<TableElement> getElements()
+    public List<ColumnDefinition> getElements()
     {
         return elements;
+    }
+
+    public List<Proctime> getProctimes()
+    {
+        return proctimeList;
     }
 
     public boolean isNotExists()
@@ -91,12 +102,12 @@ public class CreateTable
         return properties;
     }
 
-    public Map<String, String> getWithConfig()
+    public Map<String, Object> getWithConfig()
     {
         return this.getProperties().stream()
                 .collect(Collectors.toMap(
-                        k -> k.getName().getValue(),
-                        v -> v.getValue().toString().replace("'", "")));
+                        k -> k.getName(),
+                        v -> Expression.getJavaValue(v.getValue())));
     }
 
     public Optional<String> getComment()
@@ -117,7 +128,7 @@ public class CreateTable
     @Override
     public List<Node> getChildren()
     {
-        return ImmutableList.<Node>builder()
+        return MutableList.<Node>builder()
                 .addAll(elements)
                 .addAll(properties)
                 .build();

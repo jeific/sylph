@@ -15,34 +15,26 @@
  */
 package ideal.sylph.runner.flink;
 
-import com.google.inject.Injector;
-import com.google.inject.Scopes;
-import ideal.common.bootstrap.Bootstrap;
-import ideal.common.classloader.DirClassLoader;
-import ideal.sylph.etl.PipelinePlugin;
-import ideal.sylph.runner.flink.actuator.FlinkStreamEtlActuator;
-import ideal.sylph.runner.flink.actuator.FlinkStreamSqlActuator;
-import ideal.sylph.runner.flink.yarn.FlinkYarnJobLauncher;
+import com.github.harbby.gadtry.classloader.DirClassLoader;
+import com.github.harbby.gadtry.ioc.IocFactory;
+import ideal.sylph.runner.flink.engines.FlinkMainClassEngine;
+import ideal.sylph.runner.flink.engines.FlinkStreamEtlEngine;
+import ideal.sylph.runner.flink.engines.FlinkStreamSqlEngine;
+import ideal.sylph.spi.ConnectorStore;
 import ideal.sylph.spi.Runner;
 import ideal.sylph.spi.RunnerContext;
-import ideal.sylph.spi.job.JobActuatorHandle;
-import ideal.sylph.spi.model.PipelinePluginManager;
+import ideal.sylph.spi.job.ContainerFactory;
+import ideal.sylph.spi.job.JobEngineHandle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import sun.reflect.generics.tree.ClassTypeSignature;
 
 import java.io.File;
-import java.io.IOException;
-import java.lang.reflect.Field;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.github.harbby.gadtry.base.Throwables.throwsException;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Throwables.throwIfUnchecked;
 import static java.util.Objects.requireNonNull;
 
 public class FlinkRunner
@@ -52,7 +44,13 @@ public class FlinkRunner
     private static final Logger logger = LoggerFactory.getLogger(FlinkRunner.class);
 
     @Override
-    public Set<JobActuatorHandle> create(RunnerContext context)
+    public Class<? extends ContainerFactory> getContainerFactory()
+    {
+        return FlinkContainerFactory.class;
+    }
+
+    @Override
+    public Set<JobEngineHandle> create(RunnerContext context)
     {
         requireNonNull(context, "context is null");
         String flinkHome = requireNonNull(System.getenv("FLINK_HOME"), "FLINK_HOME not setting");
@@ -63,78 +61,26 @@ public class FlinkRunner
             if (classLoader instanceof DirClassLoader) {
                 ((DirClassLoader) classLoader).addDir(new File(flinkHome, "lib"));
             }
-            Bootstrap app = new Bootstrap(new FlinkRunnerModule(), binder -> {
-                binder.bind(FlinkStreamEtlActuator.class).in(Scopes.SINGLETON);
-                binder.bind(FlinkStreamSqlActuator.class).in(Scopes.SINGLETON);
-                binder.bind(FlinkYarnJobLauncher.class).in(Scopes.SINGLETON);
-                //----------------------------------
-                binder.bind(PipelinePluginManager.class)
-                        .toProvider(() -> createPipelinePluginManager(context))
-                        .in(Scopes.SINGLETON);
+            IocFactory injector = IocFactory.create(binder -> {
+                binder.bind(FlinkMainClassEngine.class).withSingle();
+                binder.bind(FlinkStreamEtlEngine.class).withSingle();
+                binder.bind(FlinkStreamSqlEngine.class).withSingle();
+                binder.bind(RunnerContext.class, context);
             });
-            Injector injector = app.strictConfig()
-                    .name(this.getClass().getSimpleName())
-                    .setRequiredConfigurationProperties(Collections.emptyMap())
-                    .initialize();
-            return Stream.of(FlinkStreamEtlActuator.class, FlinkStreamSqlActuator.class)
+
+            return Stream.of(FlinkMainClassEngine.class, FlinkStreamEtlEngine.class, FlinkStreamSqlEngine.class)
                     .map(injector::getInstance).collect(Collectors.toSet());
         }
         catch (Exception e) {
-            throwIfUnchecked(e);
-            throw new RuntimeException(e);
+            throw throwsException(e);
         }
     }
 
-    private static PipelinePluginManager createPipelinePluginManager(RunnerContext context)
+    public static ConnectorStore createConnectorStore(RunnerContext context)
     {
-        Set<String> keyword = Stream.of(
-                org.apache.flink.table.api.StreamTableEnvironment.class,
-                org.apache.flink.table.api.java.StreamTableEnvironment.class,
-//                org.apache.flink.table.api.scala.StreamTableEnvironment.class,
-                org.apache.flink.streaming.api.datastream.DataStream.class
-        ).map(Class::getName).collect(Collectors.toSet());
-
-        Set<PipelinePluginManager.PipelinePluginInfo> flinkPlugin = context.getFindPlugins().stream()
-                .filter(it -> {
-                    if (it.getRealTime()) {
-                        return true;
-                    }
-                    if (it.getJavaGenerics().length == 0) {
-                        return false;
-                    }
-                    ClassTypeSignature typeSignature = (ClassTypeSignature) it.getJavaGenerics()[0];
-                    String typeName = typeSignature.getPath().get(0).getName();
-                    return keyword.contains(typeName);
-                })
-                .collect(Collectors.groupingBy(k -> k.getPluginFile()))
-                .entrySet().stream()
-                .flatMap(it -> {
-                    try (DirClassLoader classLoader = new DirClassLoader(FlinkRunner.class.getClassLoader())) {
-                        classLoader.addDir(it.getKey());
-                        for (PipelinePluginManager.PipelinePluginInfo info : it.getValue()) {
-                            try {
-                                List<Map> config = PipelinePluginManager.parserDriverConfig(classLoader.loadClass(info.getDriverClass()).asSubclass(PipelinePlugin.class), classLoader);
-                                Field field = PipelinePluginManager.PipelinePluginInfo.class.getDeclaredField("pluginConfig");
-                                field.setAccessible(true);
-                                field.set(info, config);
-                            }
-                            catch (Exception e) {
-                                logger.warn("parser driver config failed,with {}/{}", info.getPluginFile(), info.getDriverClass(), e);
-                            }
-                        }
-                    }
-                    catch (IOException e) {
-                        logger.error("Plugins {} access failed, no plugin details will be available", it.getKey(), e);
-                    }
-                    return it.getValue().stream();
-                }).collect(Collectors.toSet());
-        return new PipelinePluginManager()
-        {
-            @Override
-            public Set<PipelinePluginInfo> getAllPlugins()
-            {
-                return flinkPlugin;
-            }
-        };
+        final Set<Class<?>> keyword = Stream.of(
+                org.apache.flink.streaming.api.datastream.DataStream.class,
+                org.apache.flink.types.Row.class).collect(Collectors.toSet());
+        return context.createConnectorStore(keyword, FlinkRunner.class);
     }
 }

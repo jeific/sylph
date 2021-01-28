@@ -15,29 +15,64 @@
  */
 package ideal.sylph.spi.job;
 
-import static ideal.sylph.spi.job.Job.Status.RUNNING;
-import static ideal.sylph.spi.job.Job.Status.STOP;
-import static java.util.Objects.requireNonNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Optional;
+
+import static ideal.sylph.spi.job.JobContainer.Status.RUNNING;
+import static ideal.sylph.spi.job.JobContainer.Status.STARTED_ERROR;
+import static ideal.sylph.spi.job.JobContainer.Status.STOP;
 
 public abstract class JobContainerAbs
         implements JobContainer
 {
-    private Job.Status status = STOP;
+    private static final Logger logger = LoggerFactory.getLogger(JobContainer.class);
+    private int countReStart;
+    private long lastStartTime;
+    private volatile Status status = STOP;
+
+    public int getCountReStart()
+    {
+        return countReStart;
+    }
+
+    public long getLastStartTime()
+    {
+        return lastStartTime;
+    }
+
+    protected abstract String deploy()
+            throws Exception;
 
     @Override
-    public void setStatus(Job.Status status)
+    public final Optional<String> run()
+            throws Exception
     {
-        this.status = requireNonNull(status, "status is null");
+        this.countReStart++;
+        long startTime = System.currentTimeMillis();
+        if ((startTime - getLastStartTime()) < 300_000) {
+            logger.warn("STARTED_ERROR, Job restarts in a short time");
+            this.setStatus(STARTED_ERROR);
+            return Optional.empty();
+        }
+        else {
+            this.lastStartTime = startTime;
+            String runId = deploy();
+            this.setStatus(RUNNING);
+            return Optional.of(runId);
+        }
     }
 
     @Override
-    public Job.Status getStatus()
+    public void setStatus(Status status)
     {
-        if (status == RUNNING) {
-            return isRunning() ? RUNNING : STOP;
-        }
+        this.status = status;
+    }
+
+    @Override
+    public Status getStatus()
+    {
         return status;
     }
-
-    public abstract boolean isRunning();
 }

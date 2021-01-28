@@ -15,30 +15,24 @@
  */
 package ideal.sylph.runner.spark;
 
-import ideal.common.ioc.Binds;
-import ideal.common.jvm.JVMException;
-import ideal.common.jvm.JVMLauncher;
-import ideal.common.jvm.JVMLaunchers;
-import ideal.sylph.runner.spark.etl.sparkstreaming.StreamNodeLoader;
-import ideal.sylph.runner.spark.etl.structured.StructuredNodeLoader;
-import ideal.sylph.spi.App;
-import ideal.sylph.spi.GraphApp;
-import ideal.sylph.spi.NodeLoader;
-import ideal.sylph.spi.exception.SylphException;
+import com.github.harbby.gadtry.ioc.Bean;
+import com.github.harbby.gadtry.ioc.IocFactory;
+import com.github.harbby.gadtry.jvm.JVMLauncher;
+import com.github.harbby.gadtry.jvm.JVMLaunchers;
+import ideal.sylph.runner.spark.sparkstreaming.StreamNodeLoader;
+import ideal.sylph.runner.spark.structured.StructuredNodeLoader;
+import ideal.sylph.spi.ConnectorStore;
 import ideal.sylph.spi.job.EtlFlow;
-import ideal.sylph.spi.model.PipelinePluginManager;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.streaming.Seconds;
 import org.apache.spark.streaming.StreamingContext;
-import org.apache.spark.streaming.dstream.DStream;
 import org.fusesource.jansi.Ansi;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.io.Serializable;
 import java.net.URLClassLoader;
 import java.util.Map;
@@ -46,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
-import static ideal.sylph.spi.exception.StandardErrorCode.JOB_BUILD_ERROR;
+import static ideal.sylph.spi.GraphAppUtil.buildGraph;
 import static org.fusesource.jansi.Ansi.Color.GREEN;
 import static org.fusesource.jansi.Ansi.Color.YELLOW;
 
@@ -61,131 +55,80 @@ final class JobHelper
 
     private static final Logger logger = LoggerFactory.getLogger(JobHelper.class);
 
-    static SparkJobHandle<App<SparkSession>> build2xJob(String jobId, EtlFlow flow, URLClassLoader jobClassLoader, PipelinePluginManager pluginManager)
+    static Serializable build2xJob(String jobId, EtlFlow flow, URLClassLoader jobClassLoader, ConnectorStore connectorStore)
+            throws Exception
     {
         final AtomicBoolean isCompile = new AtomicBoolean(true);
-        Supplier<App<SparkSession>> appGetter = (Supplier<App<SparkSession>> & Serializable) () -> new GraphApp<SparkSession, Dataset<Row>>()
-        {
-            private final SparkSession spark = getSparkSession();
+        Supplier<SparkSession> appGetter = (Supplier<SparkSession> & Serializable) () -> {
+            logger.info("========create spark SparkSession mode isCompile = " + isCompile.get() + "============");
+            SparkSession spark = isCompile.get() ? SparkSession.builder()
+                    .appName("sparkCompile")
+                    .master("local[*]")
+                    .getOrCreate()
+                    : SparkSession.builder().getOrCreate();
 
-            private SparkSession getSparkSession()
+            IocFactory iocFactory = IocFactory.create(binder -> binder.bind(SparkSession.class, spark));
+            StructuredNodeLoader loader = new StructuredNodeLoader(connectorStore, iocFactory)
             {
-                logger.info("========create spark SparkSession mode isCompile = " + isCompile.get() + "============");
-                return isCompile.get() ? SparkSession.builder()
-                        .appName("sparkCompile")
-                        .master("local[*]")
-                        .getOrCreate()
-                        : SparkSession.builder().getOrCreate();
-            }
-
-            @Override
-            public NodeLoader<Dataset<Row>> getNodeLoader()
-            {
-                Binds binds = Binds.builder()
-                        .bind(SparkSession.class, spark)
-                        .build();
-                return new StructuredNodeLoader(pluginManager, binds)
+                @Override
+                public UnaryOperator<Dataset<Row>> loadSink(String driverStr, Map<String, Object> config)
                 {
-                    @Override
-                    public UnaryOperator<Dataset<Row>> loadSink(String driverStr, Map<String, Object> config)
-                    {
-                        return isCompile.get() ? (stream) -> {
-                            super.loadSinkWithComplic(driverStr, config).apply(stream);
-                            return null;
-                        } : super.loadSink(driverStr, config);
-                    }
-                };
-            }
-
-            @Override
-            public SparkSession getContext()
-            {
-                return spark;
-            }
-
-            @Override
-            public void build()
-                    throws Exception
-            {
-                this.buildGraph(jobId, flow).run();
-            }
+                    return isCompile.get() ? (stream) -> {
+                        super.loadSinkWithComplic(driverStr, config).apply(stream);
+                        return null;
+                    } : super.loadSink(driverStr, config);
+                }
+            };
+            buildGraph(loader, flow);
+            return spark;
         };
 
-        try {
-            JVMLauncher<Integer> launcher = JVMLaunchers.<Integer>newJvm()
-                    .setCallable(() -> {
-                        appGetter.get().build();
-                        return 1;
-                    })
-                    .setConsole((line) -> System.out.println(new Ansi().fg(YELLOW).a("[" + jobId + "] ").fg(GREEN).a(line).reset()))
-                    .addUserURLClassLoader(jobClassLoader)
-                    .notDepThisJvmClassPath()
-                    .build();
-            launcher.startAndGet(jobClassLoader);
-            isCompile.set(false);
-            return new SparkJobHandle<>(appGetter);
-        }
-        catch (IOException | ClassNotFoundException | JVMException e) {
-            throw new SylphException(JOB_BUILD_ERROR, "JOB_BUILD_ERROR", e);
-        }
+        JVMLauncher<Integer> launcher = JVMLaunchers.<Integer>newJvm()
+                .setCallable(() -> {
+                    appGetter.get();
+                    return 1;
+                })
+                .setConsole((line) -> System.out.println(new Ansi().fg(YELLOW).a("[" + jobId + "] ").fg(GREEN).a(line).reset()))
+                .addUserURLClassLoader(jobClassLoader)
+                .notDepThisJvmClassPath()
+                .setClassLoader(jobClassLoader)
+                .build();
+        launcher.startAndGet();
+        isCompile.set(false);
+        return (Serializable) appGetter;
     }
 
-    static SparkJobHandle<App<StreamingContext>> build1xJob(String jobId, EtlFlow flow, URLClassLoader jobClassLoader, PipelinePluginManager pluginManager)
+    static Serializable build1xJob(String jobId, EtlFlow flow, URLClassLoader jobClassLoader, ConnectorStore connectorStore)
+            throws Exception
     {
         final AtomicBoolean isCompile = new AtomicBoolean(true);
-        final Supplier<App<StreamingContext>> appGetter = (Supplier<App<StreamingContext>> & Serializable) () -> new GraphApp<StreamingContext, DStream<Row>>()
-        {
-            private final StreamingContext spark = getStreamingContext();
+        final Supplier<StreamingContext> appGetter = (Supplier<StreamingContext> & Serializable) () -> {
+            logger.info("========create spark StreamingContext mode isCompile = " + isCompile.get() + "============");
+            SparkConf sparkConf = isCompile.get() ?
+                    new SparkConf().setMaster("local[*]").setAppName("sparkCompile")
+                    : new SparkConf();
+            //todo: 5s is default
+            SparkSession sparkSession = SparkSession.builder().config(sparkConf).getOrCreate();
+            StreamingContext spark = new StreamingContext(sparkSession.sparkContext(), Seconds.apply(5));
 
-            private StreamingContext getStreamingContext()
-            {
-                logger.info("========create spark StreamingContext mode isCompile = " + isCompile.get() + "============");
-                SparkConf sparkConf = isCompile.get() ?
-                        new SparkConf().setMaster("local[*]").setAppName("sparkCompile")
-                        : new SparkConf();
-                //todo: 5s is default
-                return new StreamingContext(sparkConf, Seconds.apply(5));
-            }
-
-            @Override
-            public NodeLoader<DStream<Row>> getNodeLoader()
-            {
-                Binds binds = Binds.builder()
-                        .bind(StreamingContext.class, spark)
-                        .build();
-                return new StreamNodeLoader(pluginManager, binds);
-            }
-
-            @Override
-            public StreamingContext getContext()
-            {
-                return spark;
-            }
-
-            @Override
-            public void build()
-                    throws Exception
-            {
-                this.buildGraph(jobId, flow).run();
-            }
+            Bean bean = binder -> binder.bind(StreamingContext.class, spark);
+            StreamNodeLoader loader = new StreamNodeLoader(connectorStore, IocFactory.create(bean));
+            buildGraph(loader, flow);
+            return spark;
         };
 
-        try {
-            JVMLauncher<Integer> launcher = JVMLaunchers.<Integer>newJvm()
-                    .setCallable(() -> {
-                        appGetter.get().build();
-                        return 1;
-                    })
-                    .setConsole((line) -> System.out.println(new Ansi().fg(YELLOW).a("[" + jobId + "] ").fg(GREEN).a(line).reset()))
-                    .addUserURLClassLoader(jobClassLoader)
-                    .notDepThisJvmClassPath()
-                    .build();
-            launcher.startAndGet(jobClassLoader);
-            isCompile.set(false);
-            return new SparkJobHandle<>(appGetter);
-        }
-        catch (IOException | ClassNotFoundException | JVMException e) {
-            throw new SylphException(JOB_BUILD_ERROR, "JOB_BUILD_ERROR", e);
-        }
+        JVMLauncher<Integer> launcher = JVMLaunchers.<Integer>newJvm()
+                .setCallable(() -> {
+                    appGetter.get();
+                    return 1;
+                })
+                .setConsole((line) -> System.out.println(new Ansi().fg(YELLOW).a("[" + jobId + "] ").fg(GREEN).a(line).reset()))
+                .addUserURLClassLoader(jobClassLoader)
+                .notDepThisJvmClassPath()
+                .setClassLoader(jobClassLoader)
+                .build();
+        launcher.startAndGet();
+        isCompile.set(false);
+        return (Serializable) appGetter;
     }
 }
